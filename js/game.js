@@ -38,6 +38,7 @@ const key = (a, b) => a < b ? a + '|' + b : b + '|' + a;
 const N = t => G.nations[t];
 const P = id => G.prov[id];
 const dateStr = (d = G.day) => { const dt = new Date(START_DATE + d * 864e5); return dt.getUTCDate() + '. ' + ['jan', 'feb', 'mar', 'apr', 'mai', 'jun', 'jul', 'aug', 'sep', 'okt', 'nov', 'des'][dt.getUTCMonth()] + ' ' + dt.getUTCFullYear(); };
+const fmtBn = v => (Math.round(v * 10) / 10).toLocaleString('nb-NO') + ' mrd $';
 const dayOfMonth = () => new Date(START_DATE + G.day * 864e5).getUTCDate();
 
 function hashColor(s) { let h = 0; for (const c of s) h = (h * 131 + c.charCodeAt(0)) % 9973; return `hsl(${h % 360},${35 + h % 25}%,${42 + (h >> 3) % 18}%)`; }
@@ -118,6 +119,7 @@ function newGame(playerTag, opts = {}) {
   }
   if (opts.ukraineWar && G.nations['643'] && G.nations['804']) setupUkraineWar();
   recalcAll();
+  for (const n of Object.values(G.nations)) initEcon(n);
   addLog(`Velkommen, leder av ${N(playerTag).name}. Året er 2026.`, 'info');
   return G;
 }
@@ -198,7 +200,11 @@ function recalcAll() {
     c.civ += p.civ * eff; c.mil += p.mil * eff; c.gdpNow += p.gdp * eff; c.provCount++; c.popNow += p.pop * (p.ctrl === p.owner ? 1 : 0.5);
     o.ownCount++; o.ownGdp += p.gdp + 0.01; if (p.ctrl === p.owner) { o.ownCtrl++; o.ownCtrlGdp += p.gdp + 0.01; }
   }
-  for (const u of G.units) { const n = N(u.o); n.divs++; n.power += (UNIT[u.t].atk + UNIT[u.t].def) * u.s / 100; }
+  for (const n of Object.values(G.nations)) { n.upkeep = 0; n.nTrade = 0; n.nSanc = 0; }
+  for (const u of G.units) { const n = N(u.o); n.divs++; n.upkeep += UNIT[u.t].up; n.power += (UNIT[u.t].atk + UNIT[u.t].def) * u.s / 100; }
+  for (const r of G.recruits) { const n = N(r.o); if (n) n.upkeep += UNIT[r.t].up * 0.5; }
+  for (const k in G.trade) for (const t of k.split('|')) if (N(t)) N(t).nTrade++;
+  for (const k in G.sanction) { const t = k.split('>')[1]; if (N(t)) N(t).nSanc++; }
   for (const n of Object.values(G.nations)) {
     n.civ = Math.floor(n.civ); n.mil = Math.floor(n.mil);
     if (n.alive && n.provCount === 0) killNation(n.tag);
@@ -216,78 +222,18 @@ function killNation(t) {
 }
 
 // ---------------------- Økonomi ----------------------
-function econDay(n) {
-  const law = LAWS.econ[n.laws.econ];
-  const stabMod = n.stab < 30 ? 0.75 : n.stab > 75 ? 1.1 : 1;
-  // inntekter/utgifter (mrd USD per dag)
-  const income = n.gdpNow * n.tax / 365;
-  const base = n.gdpNow * 0.21 / 365;
-  const milCost = n.mil * 0.0003 * n.price * law.prod;
-  const armyCost = G.units.reduce((s, u) => s + (u.o === n.tag ? UNIT[u.t].up * 0.00012 * n.price : 0), 0);
-  n.balance = income - base - milCost - armyCost;
-  n.treasury += n.balance;
-  // politisk kapital
-  n.pp = clamp(n.pp + 1 + (n.stab - 50) / 100, 0, 999);
-  // bygging
-  let avail = n.civ * (1 - law.cg) * stabMod;
-  if (n.treasury < 0) avail *= 0.5;
-  n.cpUsed = 0;
-  for (const it of n.queue) {
-    if (avail <= 0) break;
-    const use = Math.min(15, avail); avail -= use; n.cpUsed += use;
-    const infraMod = 0.8 + 0.08 * P(it.p).infra;
-    it.prog += use * infraMod;
-    if (it.prog >= BUILD[it.t].cost) it.done = true;
-  }
-  for (const it of n.queue.filter(i => i.done)) {
-    const p = P(it.p);
-    if (p.ctrl !== n.tag) continue;
-    if (it.t === 'civ') { p.civ++; p.gdp += n.gdpNow / Math.max(20, n.civ) * 0.12; }
-    else if (it.t === 'mil') p.mil++;
-    else if (it.t === 'infra') p.infra = Math.min(5, p.infra + 1);
-    else if (it.t === 'fort') p.fort = Math.min(5, p.fort + 1);
-    if (n.tag === G.player) addLog(`${BUILD[it.t].name} ferdigstilt i ${provName(p.id)}.`, 'build');
-  }
-  n.queue = n.queue.filter(i => !i.done && P(i.p).ctrl === n.tag);
-  // produksjon
-  const prod = n.mil * law.prod * stabMod * (n.treasury < 0 ? 0.6 : 1);
-  const a = n.alloc, sum = a.inf + a.arm + a.air || 1;
-  n.equip.inf += prod * a.inf / sum * EQ_RATE.inf;
-  n.equip.arm += prod * a.arm / sum * EQ_RATE.arm;
-  n.equip.air += prod * a.air / sum * EQ_RATE.air;
-  // arbeidskraft
-  n.manpower = Math.min(n.mpMax, n.manpower + n.mpMax * 0.002);
-  // stabilitet og krigsstøtte
-  const wars = warsOf(n.tag);
-  const defensive = wars.some(w => w.def.includes(n.tag));
-  const offensive = wars.some(w => w.att.includes(n.tag));
-  let target = 66 - (n.tax - 0.25) * 160 + LAWS.econ[n.laws.econ].stab + LAWS.cons[n.laws.cons].stab - (n.treasury < 0 ? 15 : 0) - (offensive && n.ws < 50 ? 12 : 0) + (n.stabBonus || 0);
-  const occ = n.ownCount ? 1 - n.ownCtrl / n.ownCount : 0; target -= occ * 25;
-  n.stab = clamp(n.stab + (target - n.stab) * 0.01, 0, 100);
-  const wsT = 25 + (defensive ? 45 : 0) + (offensive ? 12 : 0) + G.tension / 5 + (n.wsBonus || 0);
-  n.ws = clamp(n.ws + (wsT - n.ws) * 0.01, 0, 100);
-  if (n.stabBonus) n.stabBonus *= 0.995; if (n.wsBonus) n.wsBonus *= 0.995;
-  // fly-tap i krig
-  if (wars.length) n.equip.air *= 0.9995;
-}
-function gdpGrowthYear(n) {
-  let g = 0.022 + (n.stab - 55) / 2000 - (n.tax - 0.30) * 0.15;
-  g += Object.keys(G.trade).filter(k => k.split('|').includes(n.tag)).length * 0.0015;
-  g -= Object.keys(G.sanction).filter(k => k.endsWith('>' + n.tag)).length * 0.012;
-  if (warsOf(n.tag).length) g -= 0.03;
-  if (n.treasury < 0) g -= 0.02;
-  return clamp(g, -0.12, 0.08);
-}
+// econDay, gdpGrowthYear m.m. ligger i economy.js
 function monthly() {
   for (const n of Object.values(G.nations)) if (n.alive) {
-    const g = gdpGrowthYear(n) / 12;
+    econMonthly(n);
+    const g = n.growth / 12;
     for (const p of G.prov) if (p.owner === n.tag && p.ctrl === n.tag) p.gdp *= 1 + g;
   }
   // relasjoner glir mot utgangspunkt
   for (const k in G.rel) { const b = G.relBase[k] ?? 0; G.rel[k] += (b - G.rel[k]) * 0.03; }
   for (const k in G.trade) { const [a, b] = k.split('|'); addRel(a, b, 1); }
   for (const k in G.sanction) { const [a, b] = k.split('>'); addRel(a, b, -1); }
-  G.tension = clamp(G.tension - 1.4 + Math.min(4, G.wars.length) * 0.3, 0, 100);
+  G.tension = clamp(G.tension - 2 + Math.min(4, G.wars.length) * 0.25, 0, 100);
   aiMonthly();
   warPeaceCheck();
   Events.monthly();
@@ -490,8 +436,8 @@ function militaryDay() {
     const airA = sideAir(atkSide), airD = sideAir(defSide);
     const airMod = 0.35 * (airA - airD) / (airA + airD + 1);
     const sea = b.att.every(u => isSea(u.p, pid));
-    let A = b.att.reduce((s, u) => s + UNIT[u.t].atk * u.s / 100, 0) * (1 + airMod) * (sea ? 0.5 : 1) * (0.85 + rnd() * 0.3) * stabFactor(atkSide);
-    let D = b.def.reduce((s, u) => s + UNIT[u.t].def * u.s / 100, 0) * (1 - airMod) * (1 + p.fort * 0.12) * (p.core === defSide ? 1.1 : 1) * (0.85 + rnd() * 0.3) * stabFactor(defSide);
+    let A = b.att.reduce((s, u) => s + UNIT[u.t].atk * u.s / 100, 0) * (1 + airMod) * (sea ? 0.5 : 1) * (0.85 + rnd() * 0.3) * stabFactor(atkSide, 'atk');
+    let D = b.def.reduce((s, u) => s + UNIT[u.t].def * u.s / 100, 0) * (1 - airMod) * (1 + p.fort * 0.12) * (p.core === defSide ? 1.1 : 1) * (0.85 + rnd() * 0.3) * stabFactor(defSide, 'def');
     const tot = A + D + 0.01;
     for (const u of b.def) { u.s -= 9 * A / tot * (b.att.length / Math.max(1, b.def.length)) ** 0.3; }
     for (const u of b.att) { u.s -= 8 * D / tot * (b.def.length / Math.max(1, b.att.length)) ** 0.3; }
@@ -513,12 +459,13 @@ function militaryDay() {
   }
   G.recruits = G.recruits.filter(r => r.days > 0);
 }
-function sideAir(t) { let s = N(t).equip.air; for (const e of Object.values(G.nations)) if (e.alive && e.tag !== t && coBelligerent(e.tag, t)) s += e.equip.air * 0.5; return s; }
-function stabFactor(t) { const n = N(t); return 0.85 + n.stab / 400 + n.ws / 600; }
+function sideAir(t) { let s = N(t).equip.air * (1 + mods(N(t)).air); for (const e of Object.values(G.nations)) if (e.alive && e.tag !== t && coBelligerent(e.tag, t)) s += e.equip.air * (1 + mods(e).air) * 0.5; return s; }
+function stabFactor(t, kind) { const n = N(t); const m = mods(n); const f = Math.min(1, n.funding ?? 1); return (0.85 + n.stab / 400 + n.ws / 600) * (0.7 + 0.3 * f) * (1 + (kind === 'atk' ? m.atk : m.def)) * (1 + Math.max(0, n.values?.mil || 0) * 0.0008) * (groupCrisis(n, 'mil') ? 0.9 : 1); }
 function reinforce(u) {
   if (u.s >= 100) return;
   if (!friendly(u.o, P(u.p).ctrl)) return;
   const n = N(u.o); const tpl = UNIT[u.t]; const step = 3;
+  if (rnd() > Math.min(1, n.funding ?? 1)) return;
   for (const [k, v] of Object.entries(tpl.eq)) if (n.equip[k] < v * step / 100) return;
   if (n.manpower < tpl.mp * step / 100) return;
   for (const [k, v] of Object.entries(tpl.eq)) n.equip[k] -= v * step / 100;
@@ -559,6 +506,7 @@ const DIPLO = {
   faction: { name: 'Søk medlemskap i blokk', pp: 80 },
   invite: { name: 'Inviter til vår blokk', pp: 80 },
   guarantee: { name: 'Garanter uavhengighet', pp: 50 },
+  aid: { name: 'Gi økonomisk bistand', pp: 10 },
   sanction: { name: 'Innfør sanksjoner', pp: 25 },
   unsanction: { name: 'Opphev sanksjoner', pp: 10 },
   justify: { name: 'Rettferdiggjør krigsmål', pp: 75 },
@@ -597,6 +545,11 @@ function diplo(action, t) {
       pay(); if (r >= 60) { o.faction = n.faction; addLog(`${o.name} har sluttet seg til ${window.FACTIONS[n.faction].name}.`, 'good', true); return { ok: true, msg: 'Invitasjonen ble akseptert.' }; }
       return { ok: false, msg: 'De takket nei (krever relasjon ≥ 60).' };
     }
+    case 'aid': {
+      const amt = Math.max(0.2, Math.min(n.gdpNow * 0.002, o.gdpNow * 0.03));
+      pay(); n.treasury -= amt; o.treasury += amt; addRel(me, t, 15);
+      return { ok: true, msg: `Vi ga ${o.name} ${fmtBn(amt)} i bistand. Relasjonene er bedret.` };
+    }
     case 'guarantee': pay(); G.guarantee[me + '>' + t] = true; addRel(me, t, 15); return { ok: true, msg: `Vi garanterer nå ${o.name}s uavhengighet.` };
     case 'sanction': pay(); G.sanction[me + '>' + t] = true; delete G.trade[k]; addRel(me, t, -30); G.relBase[k] = (G.relBase[k] ?? 0) - 15; return { ok: true, msg: `Sanksjoner innført mot ${o.name}.` };
     case 'unsanction': pay(); delete G.sanction[me + '>' + t]; addRel(me, t, 10); return { ok: true, msg: 'Sanksjonene er opphevet.' };
@@ -631,7 +584,7 @@ function aiDay(n) {
   }
   // rekruttering
   const cap = 4 + n.mil * 1.0 + Math.sqrt(n.gdpNow) * 0.3;
-  if (myUnits.length + G.recruits.filter(r => r.o === n.tag).length < cap && n.treasury > -n.gdpNow * 0.05) {
+  if (myUnits.length + G.recruits.filter(r => r.o === n.tag).length < cap && (n.funding ?? 1) > 0.95 && !n.crisis) {
     const type = n.equip.arm > 140 ? (rnd() < 0.5 ? 'arm' : 'mech') : 'inf';
     if (!recruit(n.tag, type)) recruit(n.tag, 'inf');
   }
@@ -709,7 +662,6 @@ function aiMonthly() {
     if (!n.alive || n.tag === G.player) continue;
     const war = warsOf(n.tag).length > 0;
     // økonomi
-    if (n.treasury < 0 && n.tax < 0.4) n.tax += 0.01; else if (n.treasury > n.gdpNow * 0.1 && n.tax > 0.26) n.tax -= 0.01;
     if (war && n.laws.econ < 2 && n.pp > 75) { n.laws.econ++; n.pp -= 75; }
     if (war && n.laws.cons < 2 && n.pp > 75) { n.laws.cons++; n.pp -= 75; }
     n.alloc = war ? { inf: 0.55, arm: 0.33, air: 0.12 } : { inf: 0.55, arm: 0.3, air: 0.15 };
@@ -770,5 +722,5 @@ function saveGame(slot = 'vm2026_save') {
 function loadGame(slot = 'vm2026_save') {
   const s = localStorage.getItem(slot); if (!s) return false;
   G = JSON.parse(s); if (G.factions) window.FACTIONS = G.factions; delete G.factions;
-  buildAdj(); recalcAll(); return true;
+  buildAdj(); recalcAll(); for (const n of Object.values(G.nations)) ensureEcon(n); return true;
 }
