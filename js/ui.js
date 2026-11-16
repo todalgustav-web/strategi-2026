@@ -37,13 +37,14 @@ const UI = {
         <tr><td>Atomvåpen</td><td>${d.nuke ? 'Ja' : 'Nei'}</td></tr><tr><td>Blokk</td><td>${f ? f.name : 'Ingen'}</td></tr><tr><td>Vanskelighetsgrad</td><td>${diff}</td></tr></table>`;
       $('#btnStart').disabled = false;
     };
-    $('#btnStart').onclick = () => { newGame(this.pick, { ukraineWar: $('#optUkraine').checked }); this.enterGame(); };
+    $('#btnStart').onclick = () => { newGame(this.pick, { ukraineWar: $('#optUkraine').checked, noBlocs: $('#optNoBlocs').checked }); this.enterGame(); };
     if (localStorage.getItem('vm2026_save')) { $('#btnContinue').hidden = false; $('#btnContinue').onclick = () => { if (loadGame()) this.enterGame(); }; }
   },
   enterGame() {
     $('#start').hidden = true; $('#game').hidden = false;
     this.buildMap();
     this.bindInput();
+    if (!N(G.player).lines) this.initLines(N(G.player));
     const cap = PROV_GEO[N(G.player).capital]; this.zoomTo(cap.x, cap.y, 700);
     this.selectProv(N(G.player).capital);
     this.setSpeed(0); this.renderAll();
@@ -60,8 +61,8 @@ const UI = {
     for (const [a, b] of G.seaExtra) { const l = document.createElementNS(SVGNS, 'path'); const A = PROV_GEO[a], B = PROV_GEO[b]; l.setAttribute('d', `M${A.x},${A.y}L${B.x},${B.y}`); l.setAttribute('class', 'lane'); lanes.appendChild(l); }
     const gp = document.createElementNS(SVGNS, 'g'); gp.id = 'gProv'; svg.appendChild(gp);
     this.pathEls = PROV_GEO.map(g => { const p = document.createElementNS(SVGNS, 'path'); p.setAttribute('d', g.d); p.setAttribute('class', 'pv'); p.dataset.id = g.id; gp.appendChild(p); return p; });
-    for (const id of ['gOcc', 'gBorder', 'gLbl', 'gArrow', 'gUnits', 'gFx']) { const g = document.createElementNS(SVGNS, 'g'); g.id = id; svg.appendChild(g); }
-    $('#gOcc').style.pointerEvents = 'none'; $('#gBorder').style.pointerEvents = 'none'; $('#gArrow').style.pointerEvents = 'none'; $('#gFx').style.pointerEvents = 'none';
+    for (const id of ['gOcc', 'gBorder', 'gFront', 'gLbl', 'gArrow', 'gUnits', 'gFx']) { const g = document.createElementNS(SVGNS, 'g'); g.id = id; svg.appendChild(g); }
+    $('#gOcc').style.pointerEvents = 'none'; $('#gFront').style.pointerEvents = 'none'; $('#gBorder').style.pointerEvents = 'none'; $('#gArrow').style.pointerEvents = 'none'; $('#gFx').style.pointerEvents = 'none';
     G.dirtyMap = true; this.applyVB();
   },
   provFill(p) {
@@ -83,9 +84,26 @@ const UI = {
     // okkuperte
     const go = $('#gOcc'); go.innerHTML = '';
     for (const p of G.prov) if (p.ctrl !== p.owner) { const e = document.createElementNS(SVGNS, 'path'); e.setAttribute('d', PROV_GEO[p.id].d); e.setAttribute('fill', 'url(#hatch)'); go.appendChild(e); }
-    // landegrenser: tegn omriss med tykkere strek rundt land via filter
+    this.drawFronts();
     this.drawLabels();
     G.dirtyMap = false;
+  },
+  drawFronts() {
+    const gf = $('#gFront'); gf.innerHTML = '';
+    if (!G.wars.length) return;
+    let mine = '', other = '';
+    for (const g of PROV_GEO) {
+      const a = P(g.id).ctrl;
+      for (const j of g.n) {
+        if (j < g.id) continue;
+        const b = P(j).ctrl; if (a === b || !atWar(a, b)) continue;
+        let d = g.f && g.f[j];
+        if (!d) { const h = PROV_GEO[j]; const mx = (g.x + h.x) / 2, my = (g.y + h.y) / 2, dx = h.y - g.y, dy = g.x - h.x, L = Math.hypot(dx, dy) || 1, s = 4; d = `M${mx - dx / L * s},${my - dy / L * s}L${mx + dx / L * s},${my + dy / L * s}`; }
+        if (a === G.player || b === G.player || coBelligerent(a, G.player) || coBelligerent(b, G.player)) mine += d; else other += d;
+      }
+    }
+    const mk = (d, col, w) => `<path d="${d}" fill="none" stroke="#000" stroke-opacity=".55" stroke-width="${w + 3}" vector-effect="non-scaling-stroke" stroke-linecap="round" stroke-linejoin="round"/><path d="${d}" fill="none" stroke="${col}" stroke-width="${w}" vector-effect="non-scaling-stroke" stroke-linecap="round" stroke-linejoin="round"/>`;
+    gf.innerHTML = (other ? mk(other, '#ff9d3a', 2) : '') + (mine ? mk(mine, '#ff3b2f', 3) : '');
   },
   drawLabels() {
     const gl = $('#gLbl'); gl.innerHTML = '';
@@ -377,35 +395,61 @@ const UI = {
   panel_industry(n) {
     const law = LAWS.econ[n.laws.econ]; const cg = Math.round(n.civ * law.cg);
     const p = this.selProv != null ? P(this.selProv) : null; const mine = p && p.ctrl === G.player;
+    const bb = bizBonus(n);
     const q = n.queue.map((it, i) => `<div class="q"><span class="nm">${BUILD[it.t].name}<br><span class="mut">${esc(provName(it.p))}</span><div class="bar"><i style="width:${Math.min(100, it.prog / BUILD[it.t].cost * 100)}%"></i></div></span>
-      ${i ? `<button class="x" data-act="qup" data-i="${i}" title="Flytt opp">▲</button>` : ''}<button class="x" data-act="qdel" data-i="${i}" title="Fjern">✕</button></div>`).join('');
-    return `<div class="card"><h3>Industri</h3><table>
-      <tr><td>Sivile fabrikker</td><td>${n.civ}</td></tr><tr><td>– til konsumvarer</td><td>${cg}</td></tr>
+      ${i ? `<button class="x" data-act="qup" data-i="${i}" title="Flytt opp">▲</button>` : ''}<button class="x" data-act="qdel" data-i="${i}" title="Fjern (pengene refunderes)">✕</button></div>`).join('');
+    const groups = [...new Set(Object.values(BUILD).map(b => b.grp))];
+    const btns = groups.map(gname => `<h4>${gname}</h4>` + Object.entries(BUILD).filter(([, b]) => b.grp === gname).map(([k, b]) => `
+      <div class="q"><span class="nm"><b>${b.name}</b> <span class="mut">${SLOT_TYPES.includes(k) ? `(${fmt(n[k === 'tech' ? 'techP' : k] ?? 0)} i landet${mine ? ', ' + (p[k] || 0) + ' her' : ''})` : mine ? `(nivå ${p[k]}/5 her)` : ''}</span><br><span class="mut">${b.d}<br>${b.cost} byggepoeng · ${money(buildMoney(n, k))}</span></span>
+      <span style="display:flex;flex-direction:column;gap:3px"><button class="btn sm" data-act="build" data-t="${k}" ${mine ? '' : 'disabled'} title="Bygg i valgt provins">Bygg her</button><button class="btn sm" data-act="autobuild" data-t="${k}">Auto</button></span></div>`).join('')).join('');
+    return `<div class="card"><h3>Industri og næringsliv</h3><table>
+      <tr><td>Sivile fabrikker</td><td>${n.civ}</td></tr><tr><td>– til konsumvarer (${esc(law.name)})</td><td>${cg}</td></tr>
       <tr><td>– tilgjengelig for bygging</td><td>${n.civ - cg}</td></tr><tr><td>Militærfabrikker</td><td>${n.mil}</td></tr>
-      <tr><td>Byggeplasser i bruk</td><td>${Math.ceil((n.civ - cg) / 15)} linjer á maks 15 fabrikker</td></tr></table></div>
+      <tr><td>Parallelle byggeprosjekter</td><td>${Math.max(1, Math.ceil((n.civ - cg) / 15))} (maks 15 fabrikker hver)</td></tr></table>
+      <h4>Næringslivsbonuser</h4><table>
+      <tr><td>Kontorbygg: vekst / næringsliv</td><td class="good">+${fmt(bb.off * 100, 2)} % / +${fmt(bb.offSat)}</td></tr>
+      <tr><td>Teknologiparker: forskning</td><td class="good">+${fmt(bb.tech * 100)} %</td></tr>
+      <tr><td>Havner: vekst</td><td class="good">+${fmt(bb.port * 100, 2)} %</td></tr>
+      <tr><td>Kraftverk: bygging og produksjon</td><td class="good">+${fmt(bb.pwr * 100)} %</td></tr></table>
+      <div class="legend">Bonusene avhenger av hvor mange bygg du har i forhold til antall sivile fabrikker.</div></div>
       <div class="card"><h3>Bygg</h3>
-      ${mine ? `<div class="mut">I: <b>${esc(provName(p.id))}</b> (plass: ${p.civ + p.mil}/${maxSlots(p)}, infra ${p.infra}/5, festning ${p.fort}/5)</div>` : '<div class="mut">Velg en av dine provinser på kartet for å bygge der – eller bruk «Auto».</div>'}
-      <div class="grid2" style="margin-top:6px">${Object.entries(BUILD).map(([k, b]) => `<button class="btn sm" data-act="build" data-t="${k}" ${mine ? '' : 'disabled'}>${b.name}</button>`).join('')}</div>
-      <div class="grid2" style="margin-top:6px"><button class="btn sm" data-act="autobuild" data-t="civ">Auto: sivil fabrikk</button><button class="btn sm" data-act="autobuild" data-t="mil">Auto: militærfabrikk</button></div></div>
+      ${mine ? `<div class="mut">Valgt: <b>${esc(provName(p.id))}</b> · byggeplasser ${usedSlots(p)}/${maxSlots(p)} · infra ${p.infra}/5 · festning ${p.fort}/5</div>` : '<div class="warn">Velg en av dine provinser på kartet for «Bygg her», eller bruk «Auto».</div>'}
+      ${btns}</div>
       <div class="card"><h3>Byggekø (${n.queue.length})</h3>${q || '<div class="mut">Tom kø.</div>'}</div>`;
   },
   panel_production(n) {
-    const law = LAWS.econ[n.laws.econ]; const prod = n.mil * law.prod; const a = n.alloc; const s = a.inf + a.arm + a.air || 1;
+    if (!n.lines) this.initLines(n);
+    const fac = factoriesPerLine(n); const eff = n.prodEff ?? 1; const used = n.lines.inf + n.lines.arm + n.lines.air; const free = n.mil - used;
+    const NAMES = { inf: ['Infanteriutstyr', '🔫'], arm: ['Pansrede kjøretøy', '🛡'], air: ['Kampfly', '✈'] };
+    // utstyrsbehov for å fylle opp hæren og treningskøen
+    const need = { inf: 0, arm: 0, air: 0 };
+    for (const u of G.units) if (u.o === G.player && u.s < 100) for (const [k, v] of Object.entries(UNIT[u.t].eq)) need[k] += v * (100 - u.s) / 100;
+    const lines = ['inf', 'arm', 'air'].map(k => `<div class="q"><span class="nm"><b>${NAMES[k][1]} ${NAMES[k][0]}</b><br><span class="mut">+${fmt(fac[k] * eff * EQ_RATE[k], 1)} per dag · lager ${fmt(n.equip[k])}${need[k] > 1 ? ` · <span class="${n.equip[k] < need[k] ? 'bad' : ''}">trengs ${fmt(need[k])} til forsterkning</span>` : ''}</span></span>
+      <span style="display:flex;align-items:center;gap:3px;white-space:nowrap"><button class="btn sm" data-act="line" data-k="${k}" data-d="-5">−5</button><button class="btn sm" data-act="line" data-k="${k}" data-d="-1">−</button>
+      <b style="min-width:26px;text-align:center">${n.lines[k]}</b><button class="btn sm" data-act="line" data-k="${k}" data-d="1" ${free <= 0 ? 'disabled' : ''}>+</button><button class="btn sm" data-act="line" data-k="${k}" data-d="5" ${free <= 0 ? 'disabled' : ''}>+5</button></span></div>`).join('');
     const rec = Object.entries(UNIT).map(([k, u]) => {
       const why = canRecruit(G.player, k);
-      return `<div class="q"><span class="nm"><b>${u.name}</b><br><span class="mut">Angrep ${u.atk} · forsvar ${u.def} · fart ${u.spd}<br>${Object.entries(u.eq).map(([e, v]) => v + (e === 'inf' ? ' inf.utstyr' : ' panser')).join(' + ')} + ${u.mp}k mann · ${u.train} d</span></span>
-      <button class="btn sm green" data-act="recruit" data-t="${k}" ${why ? `disabled title="${why}"` : ''}>Tren</button></div>`;
+      return `<div class="q"><span class="nm"><b>${u.name}</b> <span class="mut">(${G.units.filter(x => x.o === G.player && x.t === k).length} i tjeneste)</span><br><span class="mut">Angrep ${u.atk} · forsvar ${u.def} · fart ${u.spd} · ${u.train} dager<br>Koster ${Object.entries(u.eq).map(([e, v]) => v + (e === 'inf' ? ' infanteriutstyr' : ' panser')).join(' + ')} + ${u.mp}k mann · drift ${money(u.up * 2.5 * n.wage)}/år</span>${why ? `<br><span class="bad" style="font-size:12px">${why}</span>` : ''}</span>
+      <span style="display:flex;flex-direction:column;gap:3px"><button class="btn sm green" data-act="recruit" data-t="${k}" data-c="1" ${why ? 'disabled' : ''}>Tren 1</button><button class="btn sm green" data-act="recruit" data-t="${k}" data-c="5" ${why ? 'disabled' : ''}>Tren 5</button></span></div>`;
     }).join('');
-    const tr = G.recruits.filter(r => r.o === G.player).map(r => `<div class="q"><span class="nm">${UNIT[r.t].name}</span><span class="mut">${r.days} d igjen</span></div>`).join('');
-    return `<div class="card"><h3>Militærproduksjon</h3>
-      <div class="mut">${n.mil} militærfabrikker × ${law.prod} (${esc(law.name)})</div>
-      ${[['inf', 'Infanteriutstyr'], ['arm', 'Pansrede kjøretøy'], ['air', 'Kampfly']].map(([k, l]) => `
-        <div class="row"><span>${l}: <b>${Math.round(a[k] / s * 100)} %</b></span><span class="mut">+${fmt(prod * a[k] / s * EQ_RATE[k], 1)}/d</span></div>
-        <input type="range" min="0" max="100" value="${Math.round(a[k] / s * 100)}" data-slider="alloc_${k}">`).join('')}
-      <h4>Lager</h4><table><tr><td>Infanteriutstyr</td><td>${fmt(n.equip.inf)}</td></tr><tr><td>Pansrede kjøretøy</td><td>${fmt(n.equip.arm)}</td></tr><tr><td>Kampfly</td><td>${fmt(n.equip.air)}</td></tr><tr><td>Arbeidskraft</td><td>${fmt(n.manpower)}k / ${fmt(n.mpMax)}k</td></tr></table>
-      <div class="legend">Fly gir luftoverlegenhet i alle kamper landet ditt deltar i.</div></div>
-      <div class="card"><h3>Tren divisjoner</h3><div class="mut" style="margin-bottom:4px">Nye divisjoner møter opp i ${esc(provName(this.recruitProv()))}.</div>${rec}</div>
-      <div class="card"><h3>Under trening (${G.recruits.filter(r => r.o === G.player).length})</h3>${tr || '<div class="mut">Ingen.</div>'}</div>`;
+    const mine = G.recruits.map((r, i) => ({ r, i })).filter(x => x.r.o === G.player);
+    const tr = mine.map(({ r, i }) => `<div class="q"><span class="nm">${UNIT[r.t].name}<br><span class="mut">${esc(provName(r.p))}</span><div class="bar"><i style="width:${(1 - r.days / UNIT[r.t].train) * 100}%"></i></div></span><span class="mut">${r.days} d</span><button class="x" data-act="rcancel" data-i="${i}" title="Avbryt (utstyr refunderes)">✕</button></div>`).join('');
+    const t = n.budgetInfo || budgetTotals(n);
+    return `<div class="card"><h3>Militærfabrikker</h3><table>
+      <tr><td>Militærfabrikker</td><td>${n.mil}</td></tr><tr><td>I bruk / ledige</td><td>${used} / <b class="${free > 0 ? 'warn' : ''}">${Math.max(0, free)}</b></td></tr>
+      <tr><td>Effektivitet</td><td class="${eff < 0.9 ? 'bad' : 'good'}">${fmt(eff * 100)} %</td></tr>
+      <tr><td>Forsvarsfinansiering</td><td class="${t.funding < 0.95 ? 'bad' : 'good'}">${fmt(t.funding * 100)} %</td></tr></table>
+      ${free > 0 ? `<div class="warn" style="font-size:12px;margin-top:4px">${free} fabrikker står ubrukt!</div>` : ''}
+      <label class="chk" style="margin-top:6px"><input type="checkbox" data-act="autoassign" ${n.autoAssign ? 'checked' : ''}> Fordel nye fabrikker automatisk</label>
+      <div class="legend">Effektiviteten påvirkes av økonomiloven (${esc(LAWS.econ[n.laws.econ].name)}), forsvarsbudsjettet, stabilitet, teknologi og kraftverk.</div></div>
+      <div class="card"><h3>Produksjonslinjer</h3>${lines}<div class="legend">Fly gir luftoverlegenhet i alle kamper landet ditt deltar i. Utstyr brukes til nye divisjoner og til å forsterke skadde enheter.</div></div>
+      <div class="card"><h3>Tren divisjoner</h3><div class="mut" style="margin-bottom:4px">Møter opp i <b>${esc(provName(this.recruitProv()))}</b> – velg en egen provins på kartet for å endre. Arbeidskraft: ${fmt(n.manpower)}k.</div>${rec}</div>
+      <div class="card"><h3>Under trening (${mine.length})</h3>${tr || '<div class="mut">Ingen.</div>'}</div>`;
+  },
+  initLines(n) {
+    const a = n.alloc, s = a.inf + a.arm + a.air || 1;
+    n.lines = { inf: Math.round(n.mil * a.inf / s), arm: Math.round(n.mil * a.arm / s), air: 0 };
+    n.lines.air = Math.max(0, n.mil - n.lines.inf - n.lines.arm); n.autoAssign = true;
   },
   recruitProv() { const p = this.selProv; return p != null && P(p).ctrl === G.player ? p : N(G.player).capital; },
   panel_military(n) {
@@ -508,9 +552,12 @@ const UI = {
         let err = 'Ingen ledige provinser'; for (const p of cands) { err = queueBuild(G.player, d.t, p.id); if (!err) { this.toast(`${BUILD[d.t].name} lagt i kø i ${provName(p.id)}.`, 'build'); break; } }
         if (err) this.toast(err, 'bad'); break;
       }
-      case 'qdel': n.queue.splice(+d.i, 1); break;
+      case 'qdel': { const it = n.queue.splice(+d.i, 1)[0]; if (it?.paid) n.treasury += it.paid; break; }
       case 'qup': { const i = +d.i; [n.queue[i - 1], n.queue[i]] = [n.queue[i], n.queue[i - 1]]; break; }
-      case 'recruit': if (recruit(G.player, d.t, this.recruitProv())) this.toast(`${UNIT[d.t].name}divisjon under trening.`, 'build'); break;
+      case 'recruit': { let c = 0; for (let i = 0; i < (+d.c || 1); i++) if (recruit(G.player, d.t, this.recruitProv())) c++; if (c) this.toast(`${c} ${UNIT[d.t].name.toLowerCase()}divisjon(er) under trening.`, 'build'); recalcAll(); break; }
+      case 'rcancel': { const r = G.recruits[+d.i]; if (r && r.o === G.player) { for (const [k, v] of Object.entries(UNIT[r.t].eq)) n.equip[k] += v; n.manpower += UNIT[r.t].mp; G.recruits.splice(+d.i, 1); recalcAll(); } break; }
+      case 'line': { if (!n.lines) this.initLines(n); const free = n.mil - (n.lines.inf + n.lines.arm + n.lines.air); const dd = +d.d; n.lines[d.k] = Math.max(0, n.lines[d.k] + (dd > 0 ? Math.min(dd, free) : dd)); break; }
+      case 'autoassign': n.autoAssign = !n.autoAssign; break;
       case 'goto': { const g = PROV_GEO[+d.p]; this.zoomTo(g.x, g.y, Math.min(this.vb.w, 600)); this.selectProv(+d.p); break; }
       case 'selall': this.selUnits = new Set(G.units.filter(u => u.o === G.player).map(u => u.id)); this.toast(`${this.selUnits.size} divisjoner valgt – høyreklikk på målet.`); break;
       case 'movemode': this.moveMode = true; $('#moveHint').hidden = false; break;

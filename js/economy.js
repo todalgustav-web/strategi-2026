@@ -127,6 +127,34 @@ function budgetTotals(n, init) {
   const funding = spend.def / Math.max(0.01, need);
   return { gdp, spend, spendShare, interest, rev, balance: rev - spendShare * gdp - interest, need, funding, rating: rt.r, rate: rt.rate, ratio: rt.ratio };
 }
+function factoriesPerLine(n) {
+  if (n.lines) {
+    const sum = n.lines.inf + n.lines.arm + n.lines.air;
+    const prev = n.linesMil ?? n.mil;
+    if (n.autoAssign && n.mil > prev) { // bare nye fabrikker fordeles automatisk
+      const free = Math.min(n.mil - prev, n.mil - sum);
+      if (free > 0) {
+        const base = sum ? { ...n.lines } : { inf: 3, arm: 2, air: 1 }; const bs = base.inf + base.arm + base.air; let given = 0;
+        for (const k of ['inf', 'arm', 'air']) { const add = Math.floor(free * base[k] / bs); n.lines[k] += add; given += add; }
+        n.lines.inf += free - given;
+      }
+    }
+    n.linesMil = n.mil;
+    const s2 = n.lines.inf + n.lines.arm + n.lines.air; const sc = s2 > n.mil ? n.mil / s2 : 1;
+    return { inf: n.lines.inf * sc, arm: n.lines.arm * sc, air: n.lines.air * sc };
+  }
+  const a = n.alloc, sum = a.inf + a.arm + a.air || 1;
+  return { inf: n.mil * a.inf / sum, arm: n.mil * a.arm / sum, air: n.mil * a.air / sum };
+}
+function bizBonus(n) {
+  const base = Math.max(5, n.civ || 0);
+  return {
+    off: Math.min(0.012, (n.off || 0) / base * 0.012), offSat: Math.min(10, (n.off || 0) / base * 40),
+    tech: Math.min(0.6, (n.techP || 0) / base * 2),
+    port: Math.min(0.01, (n.port || 0) / base * 0.02),
+    pwr: Math.min(0.2, (n.pwr || 0) / base * 0.6),
+  };
+}
 function fundingMod(n) { const f = n.funding ?? 1; return f < 1 ? Math.max(0.2, f) : 1 + Math.min(0.2, (f - 1) * 0.25); }
 function groupCrisis(n, g) { return n.grp && n.grp[g] < 25 && (n.grpPower?.[g] ?? 0) > 0.2; }
 function groupPower(n) {
@@ -152,7 +180,7 @@ function groupTargets(n) {
   const trades = n.nTrade || 0, sanc = n.nSanc || 0;
   const funding = n.funding ?? 1;
   const t = {
-    bus: 50 - (n.tax - 0.28) * 220 + (b.inf - 0.03) * 450 - v.eco * 0.15 - v.for * 0.08 + Math.min(10, trades * 1.2) - sanc * 5 - (offensive ? 12 : wars.length ? 6 : 0) + (g - 0.02) * 400,
+    bus: 50 + bizBonus(n).offSat - (n.tax - 0.28) * 220 + (b.inf - 0.03) * 450 - v.eco * 0.15 - v.for * 0.08 + Math.min(10, trades * 1.2) - sanc * 5 - (offensive ? 12 : wars.length ? 6 : 0) + (g - 0.02) * 400,
     wrk: 50 + (b.wel - welNorm) * 320 + (b.edu - 0.045) * 300 - (n.tax - 0.30) * 70 - v.gov * 0.12 - (offensive ? 15 : 0) + (g - 0.02) * 300 - (n.laws.cons >= 2 && !defensive ? 10 : 0) + (defensive ? 20 : 0),
     mil: 50 + clamp((funding - 1) * 45, -35, 20) + v.mil * 0.2 + v.gov * 0.05 + warMood(n) * 15 - (n.laws.cons === 0 ? 5 : 0),
     sec: 50 + (b.pol - 0.015) * 1500 + (b.adm - 0.03) * 700 + v.gov * 0.15 + v.eco * 0.05,
@@ -185,11 +213,13 @@ function growthParts(n) {
   const trades = n.nTrade || 0, sanc = n.nSanc || 0;
   const gpc = (n.gdpNow || n.gdp) * 1000 / Math.max(0.05, n.popNow || n.pop);
   const p = [
-    ['Grunnvekst', 0.006],
+    ['Grunnvekst', 0.002],
     ['Innhentingseffekt', gpc < 10000 ? 0.02 : gpc < 25000 ? 0.01 : 0],
     ['Utdanning', (b.edu - 0.045) * 0.5],
     ['Infrastruktur', (b.inf - 0.03) * 0.4],
     ['Forskning', b.res * 0.15],
+    ['Kontorbygg og finans', bizBonus(n).off],
+    ['Havner og logistikk', bizBonus(n).port],
     ['Skattenivå', -(n.tax - 0.30) * 0.08],
     ['Handelsavtaler', Math.min(10, trades) * 0.0006 * (1 - v.for * 0.005)],
     ['Sanksjoner mot oss', -sanc * 0.012 * (1 - Math.max(0, v.for) * 0.005)],
@@ -206,7 +236,7 @@ function growthParts(n) {
 function gdpGrowthYear(n) { return clamp(growthParts(n).reduce((s, p) => s + p[1], 0), -0.12, 0.10); }
 function rpPerDay(n) {
   const b = n.budget;
-  return (b.res * 100 * 0.6 + b.edu * 100 * 0.25) * Math.sqrt(n.gdpNow || n.gdp) / 40 * (1 + n.values.tech * 0.003);
+  return (b.res * 100 * 0.6 + b.edu * 100 * 0.25) * Math.sqrt(n.gdpNow || n.gdp) / 40 * (1 + n.values.tech * 0.003) * (1 + bizBonus(n).tech);
 }
 function techAvailable(n, t) { return !n.tech.done[t.id] && (!t.req || n.tech.done[t.req]); }
 
@@ -228,7 +258,7 @@ function econDay(n) {
   n.pp = clamp(n.pp + ppGain, 0, 999);
   for (const k in n.push) if (n.push[k] && n.pp <= 0) n.push[k] = 0;
   // bygging
-  let avail = n.civ * (1 - law.cg) * stabMod * strike * (0.7 + n.budget.inf * 10) * (1 + m.build) * (1 + Math.max(0, v.eco) * 0.002);
+  let avail = n.civ * (1 - law.cg) * stabMod * strike * (0.7 + n.budget.inf * 10) * (1 + m.build) * (1 + Math.max(0, v.eco) * 0.002) * (1 + bizBonus(n).pwr);
   if (n.crisis) avail *= 0.6;
   n.cpUsed = 0;
   for (const it of n.queue) {
@@ -240,20 +270,24 @@ function econDay(n) {
   for (const it of n.queue.filter(i => i.done)) {
     const p = P(it.p);
     if (p.ctrl !== n.tag) continue;
-    if (it.t === 'civ') { p.civ++; p.gdp += n.gdpNow / Math.max(20, n.civ) * 0.12; }
+    const gpf = n.gdpNow / Math.max(20, n.civ);
+    if (it.t === 'civ') { p.civ++; p.gdp += gpf * 0.12; }
     else if (it.t === 'mil') p.mil++;
+    else if (it.t === 'off') { p.off = (p.off || 0) + 1; p.gdp += gpf * 0.3; }
+    else if (it.t === 'tech') { p.tech = (p.tech || 0) + 1; p.gdp += gpf * 0.15; }
+    else if (it.t === 'port') { p.port = (p.port || 0) + 1; p.gdp += gpf * 0.2; }
+    else if (it.t === 'pwr') { p.pwr = (p.pwr || 0) + 1; p.gdp += gpf * 0.05; }
     else if (it.t === 'infra') p.infra = Math.min(5, p.infra + 1);
     else if (it.t === 'fort') p.fort = Math.min(5, p.fort + 1);
     if (n.tag === G.player) addLog(`${BUILD[it.t].name} ferdigstilt i ${provName(p.id)}.`, 'build');
   }
   n.queue = n.queue.filter(i => !i.done && P(i.p).ctrl === n.tag);
   // militærproduksjon
-  const prod = n.mil * law.prod * stabMod * strike * fundingMod(n) * (1 + m.milProd) * (1 + Math.max(0, v.eco) * 0.001) * (n.crisis ? 0.6 : 1);
-  n.prodNow = prod;
-  const a = n.alloc, sum = a.inf + a.arm + a.air || 1;
-  n.equip.inf += prod * a.inf / sum * EQ_RATE.inf;
-  n.equip.arm += prod * a.arm / sum * EQ_RATE.arm;
-  n.equip.air += prod * a.air / sum * EQ_RATE.air;
+  const eff = law.prod * stabMod * strike * fundingMod(n) * (1 + m.milProd) * (1 + Math.max(0, v.eco) * 0.001) * (n.crisis ? 0.6 : 1) * (1 + bizBonus(n).pwr);
+  n.prodEff = eff;
+  const fac = factoriesPerLine(n);
+  n.prodOut = {};
+  for (const k of ['inf', 'arm', 'air']) { n.prodOut[k] = fac[k] * eff * EQ_RATE[k]; n.equip[k] += n.prodOut[k]; }
   // arbeidskraft
   n.mpMax = n.popNow * 1000 * LAWS.cons[n.laws.cons].rate * (1 + Math.max(0, v.mil) * 0.004 + m.mp + (n.budget.wel - 0.09) * 1.5);
   n.manpower = Math.min(n.mpMax, n.manpower + n.mpMax * 0.002);

@@ -11,11 +11,18 @@ const UNIT = {
 };
 const EQ_RATE = { inf: 0.8, arm: 0.25, air: 0.08 }; // per militærfabrikk per dag
 const BUILD = {
-  civ: { name: 'Sivil fabrikk', cost: 1000 },
-  mil: { name: 'Militærfabrikk', cost: 850 },
-  infra: { name: 'Infrastruktur', cost: 600 },
-  fort: { name: 'Festningsverk', cost: 450 },
+  civ: { name: 'Sivil fabrikk', cost: 1000, money: 2, slot: 1, grp: 'Industri', d: 'Bygger nye bygninger og produserer konsumvarer.' },
+  mil: { name: 'Militærfabrikk', cost: 850, money: 2, slot: 1, grp: 'Industri', d: 'Produserer utstyr til hæren og flyvåpenet.' },
+  off: { name: 'Kontorbygg og finans', cost: 700, money: 3, slot: 1, grp: 'Næringsliv', d: 'Mer BNP og skatteinntekter. Næringslivet blir mer fornøyd.' },
+  tech: { name: 'Teknologipark', cost: 900, money: 4, slot: 1, grp: 'Næringsliv', d: 'Flere forskningspoeng og litt mer BNP.' },
+  port: { name: 'Havn og logistikksenter', cost: 800, money: 3, slot: 1, grp: 'Næringsliv', d: 'Høyere økonomisk vekst gjennom handel og logistikk.' },
+  pwr: { name: 'Kraftverk', cost: 750, money: 3, slot: 1, grp: 'Næringsliv', d: 'Billig energi: raskere bygging og mer militærproduksjon.' },
+  infra: { name: 'Infrastruktur', cost: 600, money: 1.5, grp: 'Infrastruktur og forsvar', d: 'Raskere bygging og forflytning, flere byggeplasser.' },
+  fort: { name: 'Festningsverk', cost: 450, money: 1, grp: 'Infrastruktur og forsvar', d: '+12 % forsvar per nivå i provinsen.' },
 };
+const SLOT_TYPES = ['civ', 'mil', 'off', 'tech', 'port', 'pwr'];
+const buildMoney = (n, t) => BUILD[t].money * (n.wage || 0.5);
+const usedSlots = p => SLOT_TYPES.reduce((s, k) => s + (p[k] || 0), 0);
 const LAWS = {
   cons: [
     { name: 'Frivillig hær', rate: 0.01, stab: 0 },
@@ -50,7 +57,7 @@ function newGame(playerTag, opts = {}) {
   // provinser
   for (const g of PROV_GEO) {
     const owner = TERRITORY[g.c] || g.c;
-    G.prov.push({ id: g.id, owner, ctrl: owner, core: owner, civ: 0, mil: 0, infra: 2, fort: 0, gdp: 0, pop: 0 });
+    G.prov.push({ id: g.id, owner, ctrl: owner, core: owner, civ: 0, mil: 0, off: 0, tech: 0, port: 0, pwr: 0, infra: 2, fort: 0, gdp: 0, pop: 0 });
   }
   // havruter
   for (const [a, b] of window.SEA_LANES) {
@@ -88,11 +95,17 @@ function newGame(playerTag, opts = {}) {
     provs.forEach((p, i) => { p.gdp = gdp * w[i] / ws; p.pop = pop * w[i] / ws; p.infra = n.infraLvl; });
     distribute(provs, w, d.civ ?? Math.max(1, Math.round(gdp / 25)), 'civ');
     distribute(provs, w, d.mil ?? (gdp > 60 ? 1 : 0), 'mil');
+    const civN = d.civ ?? Math.max(1, Math.round(gdp / 25)); const rich = gpc > 25000 ? 2 : gpc > 8000 ? 1 : 0;
+    distribute(provs, w, Math.round(civN * [0.08, 0.2, 0.4][rich]), 'off');
+    distribute(provs, w, Math.round(civN * [0, 0.05, 0.12][rich]), 'tech');
+    distribute(provs, w, Math.round(civN * [0.04, 0.08, 0.1][rich]), 'port');
+    distribute(provs, w, Math.round(civN * 0.1), 'pwr');
     n.manpower = pop * 1000 * LAWS.cons[n.laws.cons].rate * 0.35;
   }
   for (const [ter, own] of Object.entries(TERRITORY)) if (G.nations[own]) G.prov.filter(p => p.core === ter).forEach(p => p.core = own);
   // fraksjoner
-  for (const [fid, f] of Object.entries(window.FACTIONS)) for (const m of f.members) if (G.nations[m]) G.nations[m].faction = fid;
+  G.noBlocs = !!opts.noBlocs;
+  if (!opts.noBlocs) for (const [fid, f] of Object.entries(window.FACTIONS)) for (const m of f.members) if (G.nations[m]) G.nations[m].faction = fid;
   for (const [a, b] of window.PACTS) if (G.nations[a] && G.nations[b]) G.alliance[key(a, b)] = true;
   G.guarantee['840>158'] = true;
   // relasjoner
@@ -155,7 +168,8 @@ function setupUkraineWar() {
   const ru = G.prov.filter(p => p.ctrl === '643' && G.adj[p.id].some(e => P(e.to).ctrl === '804'));
   let i = 0;
   for (const u of G.units) {
-    if (u.o === '804' && front.length && i++ % 4 !== 0) u.p = front[i % front.length].id;
+    if (u.o === '804' && front.length && (i++ % 4 !== 0 || P(u.p).ctrl !== '804')) u.p = front[i % front.length].id;
+    if (u.o === '643' && P(u.p).ctrl !== '643') u.p = N('643').capital;
     if (u.o === '643' && ru.length && rnd() < 0.55) u.p = ru[Math.floor(rnd() * ru.length)].id;
   }
   G.tension = 58;
@@ -193,11 +207,11 @@ function landNeighbors(t) { const s = new Set(); for (const p of G.prov) if (p.c
 
 // ---------------------- Aggregater ----------------------
 function recalcAll() {
-  for (const n of Object.values(G.nations)) { n.civ = 0; n.mil = 0; n.gdpNow = 0; n.provCount = 0; n.ownCount = 0; n.ownCtrl = 0; n.ownGdp = 0; n.ownCtrlGdp = 0; n.popNow = 0; n.divs = 0; n.power = 0; }
+  for (const n of Object.values(G.nations)) { n.civ = 0; n.mil = 0; n.off = 0; n.techP = 0; n.port = 0; n.pwr = 0; n.gdpNow = 0; n.provCount = 0; n.ownCount = 0; n.ownCtrl = 0; n.ownGdp = 0; n.ownCtrlGdp = 0; n.popNow = 0; n.divs = 0; n.power = 0; }
   for (const p of G.prov) {
     const c = N(p.ctrl), o = N(p.owner);
     const eff = p.ctrl === p.owner ? 1 : 0.4;
-    c.civ += p.civ * eff; c.mil += p.mil * eff; c.gdpNow += p.gdp * eff; c.provCount++; c.popNow += p.pop * (p.ctrl === p.owner ? 1 : 0.5);
+    c.civ += p.civ * eff; c.mil += p.mil * eff; c.off += (p.off || 0) * eff; c.techP += (p.tech || 0) * eff; c.port += (p.port || 0) * eff; c.pwr += (p.pwr || 0) * eff; c.gdpNow += p.gdp * eff; c.provCount++; c.popNow += p.pop * (p.ctrl === p.owner ? 1 : 0.5);
     o.ownCount++; o.ownGdp += p.gdp + 0.01; if (p.ctrl === p.owner) { o.ownCtrl++; o.ownCtrlGdp += p.gdp + 0.01; }
   }
   for (const n of Object.values(G.nations)) { n.upkeep = 0; n.nTrade = 0; n.nSanc = 0; }
@@ -250,7 +264,7 @@ function declareWar(a, t, opts = {}) {
   delete G.trade[key(a, t)];
   na.justify = null; na.lastWarDecl = G.day;
   const w = { id: G.nextId++, name: `${na.name}s angrep på ${nt.name}`, att: [a], def: [t], start: G.day };
-  G.wars.push(w);
+  G.wars.push(w); G.dirtyMap = true;
   addRel(a, t, -60);
   G.tension = clamp(G.tension + 8 + Math.sqrt(nt.gdp) / 10, 0, 100);
   addLog(`⚔ ${na.name} har erklært krig mot ${nt.name}!`, 'war', true);
@@ -489,10 +503,13 @@ function recruit(t, type, p) {
 function queueBuild(t, type, pid) {
   const n = N(t), p = P(pid);
   if (p.ctrl !== t) return 'Provinsen er ikke under din kontroll';
-  if ((type === 'civ' || type === 'mil') && p.civ + p.mil + n.queue.filter(i => i.p === pid && (i.t === 'civ' || i.t === 'mil')).length >= maxSlots(p)) return 'Ingen ledige byggeplasser (bygg infrastruktur)';
+  if (SLOT_TYPES.includes(type) && usedSlots(p) + n.queue.filter(i => i.p === pid && SLOT_TYPES.includes(i.t)).length >= maxSlots(p)) return 'Ingen ledige byggeplasser (bygg infrastruktur)';
+  const cost = buildMoney(n, type);
+  if (n.crisis) return 'Statsbankerott – ingen penger til nye prosjekter';
   if (type === 'infra' && p.infra + n.queue.filter(i => i.p === pid && i.t === 'infra').length >= 5) return 'Maks infrastruktur';
   if (type === 'fort' && p.fort + n.queue.filter(i => i.p === pid && i.t === 'fort').length >= 5) return 'Maks festningsnivå';
-  n.queue.push({ t: type, p: pid, prog: 0 });
+  n.treasury -= cost;
+  n.queue.push({ t: type, p: pid, prog: 0, paid: cost });
   return null;
 }
 function maxSlots(p) { return 8 + p.infra * 6 + Math.round(Math.sqrt(p.pop) * 2); }
@@ -672,6 +689,8 @@ function aiMonthly() {
         const p = provs[Math.floor(rnd() * provs.length)];
         const milShare = war || n.aggr > 0.3 || G.tension > 65 ? 0.6 : 0.3;
         let t = rnd() < milShare ? 'mil' : 'civ';
+        const r = rnd();
+        if (!war && r < 0.35) t = ['off', 'off', 'tech', 'port', 'pwr'][Math.floor(rnd() * 5)];
         if (p.infra < 3 && rnd() < 0.3) t = 'infra';
         if (queueBuild(n.tag, t, p.id)) queueBuild(n.tag, 'infra', p.id);
       }
